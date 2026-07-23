@@ -29,4 +29,56 @@ jobs:
           node-version: "22"
 
       - name: Set up Java
-        uses: actions/setup-java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Prepare web files
+        run: |
+          mkdir -p www
+          cp index.html www/
+          cp style.css www/
+          cp app.js www/
+          cp firebase-config.js www/
+          cp manifest.json www/
+
+          if [ -f logo.svg ]; then
+            cp logo.svg www/
+          fi
+
+          if [ -f service-worker.js ]; then
+            cp service-worker.js www/
+          fi
+
+      - name: Set Capacitor web directory
+        run: |
+          node -e "
+          const fs = require('fs');
+          const config = JSON.parse(fs.readFileSync('capacitor.config.json', 'utf8'));
+          config.webDir = 'www';
+          fs.writeFileSync('capacitor.config.json', JSON.stringify(config, null, 2));
+          "
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Sync Android project
+        run: npx cap sync android
+
+      - name: Give Gradle permission
+        run: chmod +x android/gradlew
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: United-Builders-Attendance-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
