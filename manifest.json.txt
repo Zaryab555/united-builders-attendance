@@ -1,0 +1,11 @@
+{
+  "name": "United Builders Staff Attendance",
+  "short_name": "UB Attendance",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#0f172a",
+  "icons": [
+    {"src":"logo.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}
