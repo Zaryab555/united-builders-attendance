@@ -1,0 +1,6 @@
+{
+  "appId": "com.unitedbuilders.attendance",
+  "appName": "United Builders Attendance",
+  "webDir": ".",
+  "bundledWebRuntime": false
+}
