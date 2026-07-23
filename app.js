@@ -1,17 +1,113 @@
-const workers=Array.from({length:15},(_,i)=>({id:i+1,name:`Worker ${String(i+1).padStart(2,'0')}`,pin:String(1001+i)}));let user=null;
-const $=x=>document.getElementById(x),get=()=>JSON.parse(localStorage.getItem('ub_att')||'[]'),set=x=>localStorage.setItem('ub_att',JSON.stringify(x));
-function show(id){['login','worker','admin'].forEach(x=>$(x).classList.add('hidden'));$(id).classList.remove('hidden')}
-function login(){let p=$('pin').value;if(p==='9999'){user={admin:true};show('admin');renderAdmin();return}let w=workers.find(x=>x.pin===p);if(!w){$('err').textContent='Incorrect PIN';return}user=w;show('worker');$('wname').textContent=w.name;renderWorker()}
-function logout(){user=null;$('pin').value='';show('login')}
-function current(id){return get().find(x=>x.workerId===id&&!x.out)}
-function mins(a,b){return Math.max(0,Math.round((new Date(b)-new Date(a))/60000))}
-function breakM(e){return (e.breaks||[]).reduce((s,b)=>s+(b.end?mins(b.start,b.end):0),0)}
-function worked(e){return e.out?Math.max(0,mins(e.in,e.out)-breakM(e)):0}
-function fmt(m){return `${Math.floor(m/60)}h ${String(m%60).padStart(2,'0')}m`}
-function weekStart(){let d=new Date(),n=(d.getDay()+6)%7;d.setHours(0,0,0,0);d.setDate(d.getDate()-n);return d}
-function thisWeek(t){return new Date(t)>=weekStart()}
-function geo(){return new Promise(r=>navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>r({lat:p.coords.latitude,lng:p.coords.longitude}),()=>r(null),{timeout:8000}):r(null))}
-async function act(type){let all=get(),e=current(user.id),now=new Date().toISOString();if(type==='in'){if(e)return alert('Already clocked in');let loc=await geo();all.push({id:Date.now(),workerId:user.id,site:$('site').value,in:now,out:null,breaks:[],inLoc:loc})}if(type==='breakStart'){if(!e)return alert('Clock in first');if(e.breaks.some(b=>!b.end))return alert('Break already started');e.breaks.push({start:now,end:null})}if(type==='breakEnd'){if(!e)return alert('Clock in first');let b=e.breaks.find(b=>!b.end);if(!b)return alert('No active break');b.end=now}if(type==='out'){if(!e)return alert('Clock in first');let b=e.breaks.find(b=>!b.end);if(b)b.end=now;e.out=now;e.outLoc=await geo()}set(all);renderWorker()}
-function renderWorker(){let e=current(user.id),onBreak=e&&e.breaks.some(b=>!b.end);$('status').textContent=onBreak?'Status: On break':e?'Status: Clocked in':'Status: Not clocked in';let total=get().filter(x=>x.workerId===user.id&&thisWeek(x.in)).reduce((s,x)=>s+worked(x),0);$('week').textContent=fmt(total)}
-function renderAdmin(){let all=get();$('rows').innerHTML=workers.map(w=>{let e=current(w.id),total=all.filter(x=>x.workerId===w.id&&thisWeek(x.in)).reduce((s,x)=>s+worked(x),0);return `<tr><td>${w.name}</td><td>${e?(e.breaks.some(b=>!b.end)?'On break':'Clocked in'):'Off'}</td><td>${e?e.site:'—'}</td><td>${fmt(total)}</td></tr>`}).join('')}
-function exportCSV(){let rows=[['Worker','Site','Clock In','Clock Out','Break Minutes','Worked Minutes','Latitude','Longitude']];get().forEach(e=>{let w=workers.find(x=>x.id===e.workerId);rows.push([w.name,e.site,e.in,e.out||'',breakM(e),worked(e),e.inLoc?.lat||'',e.inLoc?.lng||''])});let csv=rows.map(r=>r.map(v=>`"${String(v).replaceAll('"','""')}"`).join(',')).join('\n');let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='united-builders-attendance.csv';a.click()}
+import { firebaseConfig } from "./firebase-config.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+import { getFirestore, collection, getDocs, doc, setDoc, addDoc, updateDoc, query, where, serverTimestamp, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-storage.js";
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+const storage = getStorage(firebaseApp);
+const $ = id => document.getElementById(id);
+
+let currentUser = null, todayAttendance = null, usersCache = [], sitesCache = [];
+
+const defaultUsers = [
+{id:"safeer-ahmad",name:"Safeer Ahmad",role:"admin",pin:"1001",active:true},
+{id:"muhammad-kashif-ayoub",name:"Muhammad Kashif Ayoub",role:"manager",pin:"1002",active:true},
+{id:"zaryab-rashid",name:"Zaryab Rashid",role:"worker",pin:"1003",active:true},
+{id:"shahid-ali",name:"Shahid Ali",role:"worker",pin:"1004",active:true},
+{id:"amir-shahzad",name:"Amir Shahzad",role:"worker",pin:"1005",active:true},
+{id:"gohar-nisar",name:"Gohar Nisar",role:"worker",pin:"1006",active:true},
+{id:"nadeem",name:"Nadeem",role:"worker",pin:"1007",active:true},
+{id:"mazhar",name:"Mazhar",role:"worker",pin:"1008",active:true},
+{id:"faheem",name:"Faheem",role:"worker",pin:"1009",active:true},
+{id:"noman",name:"Noman",role:"worker",pin:"1010",active:true},
+{id:"shoib",name:"Shoib",role:"worker",pin:"1011",active:true},
+{id:"keerus",name:"Keerus",role:"worker",pin:"1012",active:true},
+{id:"david",name:"David",role:"worker",pin:"1013",active:true},
+{id:"shaban",name:"Shaban",role:"worker",pin:"1014",active:true}
+];
+
+const slugify=v=>v.toLowerCase().trim().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+const dateKey=(d=new Date())=>d.toISOString().slice(0,10);
+const msg=(id,t)=>$(id).textContent=t;
+const formatTime=ts=>!ts?"-":(ts.toDate?ts.toDate():new Date(ts)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+const durationText=ms=>{const m=Math.max(0,Math.floor(ms/60000));return `${Math.floor(m/60)}h ${m%60}m`;};
+
+async function getLocation(){return new Promise(resolve=>{if(!navigator.geolocation)return resolve(null);navigator.geolocation.getCurrentPosition(p=>resolve({lat:p.coords.latitude,lng:p.coords.longitude,accuracy:p.coords.accuracy}),()=>resolve(null),{enableHighAccuracy:true,timeout:10000});});}
+
+async function seedData(){
+  for(const u of defaultUsers) await setDoc(doc(db,"users",u.id),u,{merge:true});
+  await setDoc(doc(db,"sites","main-site"),{name:"Main Site",active:true},{merge:true});
+}
+
+async function loadUsersAndSites(){
+  usersCache=[]; const us=await getDocs(collection(db,"users")); us.forEach(d=>usersCache.push({id:d.id,...d.data()}));
+  usersCache=usersCache.filter(x=>x.active!==false).sort((a,b)=>a.name.localeCompare(b.name));
+  sitesCache=[]; const ss=await getDocs(collection(db,"sites")); ss.forEach(d=>sitesCache.push({id:d.id,...d.data()}));
+  sitesCache=sitesCache.filter(x=>x.active!==false).sort((a,b)=>a.name.localeCompare(b.name));
+  $("employeeSelect").innerHTML=usersCache.map(x=>`<option value="${x.id}">${x.name} — ${x.role}</option>`).join("");
+  $("siteSelect").innerHTML=sitesCache.map(x=>`<option value="${x.id}">${x.name}</option>`).join("");
+}
+
+async function login(){
+  const u=usersCache.find(x=>x.id===$("employeeSelect").value);
+  if(!u||$("pinInput").value!==u.pin)return msg("loginMessage","Incorrect PIN.");
+  currentUser=u; sessionStorage.setItem("ubaUserId",u.id); showDashboard(); await refreshUserData();
+}
+
+function showDashboard(){
+  $("loginView").classList.add("hidden"); $("dashboardView").classList.remove("hidden");
+  $("welcomeTitle").textContent=`Welcome, ${currentUser.name}`; $("roleText").textContent=currentUser.role.toUpperCase();
+  if(["admin","manager"].includes(currentUser.role))$("managementPanel").classList.remove("hidden");
+  if(currentUser.role==="admin")$("adminOnlyPanel").classList.remove("hidden");
+}
+
+async function refreshUserData(){
+  const q1=query(collection(db,"attendance"),where("userId","==",currentUser.id),where("dateKey","==",dateKey()));
+  const s1=await getDocs(q1); todayAttendance=s1.empty?null:{id:s1.docs[0].id,...s1.docs[0].data()};
+  let status="Not clocked in"; if(todayAttendance?.clockIn&&!todayAttendance?.clockOut)status=todayAttendance.breakOpen?"On break":"Clocked in"; if(todayAttendance?.clockOut)status="Clocked out";
+  $("currentStatus").textContent=status;
+  let t=0;if(todayAttendance?.clockIn){const a=todayAttendance.clockIn.toDate(),b=todayAttendance.clockOut?.toDate()||new Date();t=b-a-(todayAttendance.totalBreakMs||0);} $("todayHours").textContent=durationText(t);
+  const start=new Date();start.setDate(start.getDate()-((start.getDay()+6)%7));start.setHours(0,0,0,0);
+  const q2=query(collection(db,"attendance"),where("userId","==",currentUser.id),where("clockIn",">=",Timestamp.fromDate(start)));
+  const s2=await getDocs(q2);let w=0;s2.forEach(d=>{const a=d.data();if(a.clockIn){w+=(a.clockOut?.toDate()||new Date())-a.clockIn.toDate()-(a.totalBreakMs||0);}});$("weekHours").textContent=durationText(w);
+  if(["admin","manager"].includes(currentUser.role))await refreshManagement();
+}
+
+async function clockIn(){
+  if(todayAttendance?.clockIn)return msg("attendanceMessage","Already clocked in today.");
+  const loc=await getLocation(),siteId=$("siteSelect").value,site=sitesCache.find(s=>s.id===siteId);
+  await addDoc(collection(db,"attendance"),{userId:currentUser.id,userName:currentUser.name,role:currentUser.role,siteId,siteName:site?.name||"",dateKey:dateKey(),clockIn:serverTimestamp(),clockInLocation:loc,clockOut:null,totalBreakMs:0,breakOpen:false,createdAt:serverTimestamp()});
+  msg("attendanceMessage","Clocked in successfully.");await refreshUserData();
+}
+
+async function clockOut(){
+  if(!todayAttendance?.clockIn||todayAttendance?.clockOut)return msg("attendanceMessage","No active attendance found.");
+  const loc=await getLocation();let total=todayAttendance.totalBreakMs||0;if(todayAttendance.breakOpen&&todayAttendance.breakStartedAt)total+=Date.now()-todayAttendance.breakStartedAt.toDate().getTime();
+  await updateDoc(doc(db,"attendance",todayAttendance.id),{clockOut:serverTimestamp(),clockOutLocation:loc,breakOpen:false,breakStartedAt:null,totalBreakMs:total});
+  msg("attendanceMessage","Clocked out successfully.");await refreshUserData();
+}
+
+async function startBreak(){if(!todayAttendance?.clockIn||todayAttendance?.clockOut)return msg("attendanceMessage","Clock in first.");if(todayAttendance.breakOpen)return msg("attendanceMessage","Break is already running.");await updateDoc(doc(db,"attendance",todayAttendance.id),{breakOpen:true,breakStartedAt:serverTimestamp()});msg("attendanceMessage","Break started.");await refreshUserData();}
+async function endBreak(){if(!todayAttendance?.breakOpen||!todayAttendance.breakStartedAt)return msg("attendanceMessage","No active break.");const total=(todayAttendance.totalBreakMs||0)+(Date.now()-todayAttendance.breakStartedAt.toDate().getTime());await updateDoc(doc(db,"attendance",todayAttendance.id),{breakOpen:false,breakStartedAt:null,totalBreakMs:total});msg("attendanceMessage","Break ended.");await refreshUserData();}
+
+async function saveReport(){
+  const note=$("workNote").value.trim();if(!note)return msg("reportMessage","Please enter work details.");
+  let photoUrl="";const file=$("photoInput").files[0];if(file){const r=ref(storage,`reports/${currentUser.id}/${Date.now()}-${file.name}`);await uploadBytes(r,file);photoUrl=await getDownloadURL(r);}
+  await addDoc(collection(db,"reports"),{userId:currentUser.id,userName:currentUser.name,siteId:$("siteSelect").value,siteName:sitesCache.find(s=>s.id===$("siteSelect").value)?.name||"",note,photoUrl,dateKey:dateKey(),createdAt:serverTimestamp()});
+  $("workNote").value="";$("photoInput").value="";msg("reportMessage","Report saved.");
+}
+
+async function refreshManagement(){
+  const q=query(collection(db,"attendance"),where("dateKey","==",dateKey()));const s=await getDocs(q);const rows=[];s.forEach(d=>rows.push({id:d.id,...d.data()}));rows.sort((a,b)=>(a.userName||"").localeCompare(b.userName||""));
+  $("attendanceTableBody").innerHTML=rows.map(a=>`<tr><td>${a.userName||""}</td><td>${a.role||""}</td><td>${a.siteName||""}</td><td>${formatTime(a.clockIn)}</td><td>${formatTime(a.clockOut)}</td><td>${a.clockOut?"Clocked out":a.breakOpen?"On break":"Working"}</td></tr>`).join("")||`<tr><td colspan="6">No attendance yet.</td></tr>`;
+}
+
+async function addWorker(){const name=$("newWorkerName").value.trim(),role=$("newWorkerRole").value,pin=$("newWorkerPin").value.trim();if(!name||!/^\d{4}$/.test(pin))return alert("Enter a name and a 4-digit PIN.");await setDoc(doc(db,"users",slugify(name)||`worker-${Date.now()}`),{name,role,pin,active:true},{merge:true});$("newWorkerName").value="";$("newWorkerPin").value="";await loadUsersAndSites();alert("Worker added.");}
+async function addSite(){const name=$("newSiteName").value.trim();if(!name)return alert("Enter a site name.");await setDoc(doc(db,"sites",`${slugify(name)}-${Date.now()}`),{name,active:true});$("newSiteName").value="";await loadUsersAndSites();alert("Site added.");}
+
+async function exportCsv(){const s=await getDocs(collection(db,"attendance"));const lines=[["Name","Role","Date","Site","Clock In","Clock Out","Break Minutes"]];s.forEach(d=>{const a=d.data();lines.push([a.userName||"",a.role||"",a.dateKey||"",a.siteName||"",formatTime(a.clockIn),formatTime(a.clockOut),Math.round((a.totalBreakMs||0)/60000)]);});const csv=lines.map(r=>r.map(v=>`"${String(v).replaceAll('"','""')}"`).join(",")).join("\n");const blob=new Blob([csv],{type:"text/csv"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`united-builders-attendance-${dateKey()}.csv`;a.click();URL.revokeObjectURL(url);}
+
+$("loginBtn")?.addEventListener("click",login);$("logoutBtn")?.addEventListener("click",()=>{sessionStorage.clear();location.reload();});$("clockInBtn")?.addEventListener("click",clockIn);$("clockOutBtn")?.addEventListener("click",clockOut);$("breakStartBtn")?.addEventListener("click",startBreak);$("breakEndBtn")?.addEventListener("click",endBreak);$("saveReportBtn")?.addEventListener("click",saveReport);$("refreshAdminBtn")?.addEventListener("click",refreshManagement);$("exportCsvBtn")?.addEventListener("click",exportCsv);$("addWorkerBtn")?.addEventListener("click",addWorker);$("addSiteBtn")?.addEventListener("click",addSite);
+
+try{msg("loginMessage","Connecting to Firebase...");await seedData();await loadUsersAndSites();msg("loginMessage","");const saved=sessionStorage.getItem("ubaUserId");if(saved){currentUser=usersCache.find(x=>x.id===saved);if(currentUser){showDashboard();await refreshUserData();}}}catch(e){console.error(e);msg("loginMessage","Firebase connection failed. Check firebase-config.js and Firestore rules.");}
